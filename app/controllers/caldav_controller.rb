@@ -1,4 +1,4 @@
-class CalDAVController < ApplicationController
+class CaldavController < ApplicationController
   before_action :check_plugin_right
   before_action :set_calendar
 
