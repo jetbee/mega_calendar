@@ -5,3 +5,5 @@ if Gem::Version.new(Bundler::VERSION) < Gem::Version.new('1.5.0')
 end
 
 gem "vpim", :git => "https://github.com/sam-github/vpim.git", :ref => "b33ec0e9cee9899331ebc5838c69d622fcbe6970"
+gem 'icalendar'
+gem 'nokogiri'
