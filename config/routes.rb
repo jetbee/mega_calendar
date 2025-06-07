@@ -11,8 +11,8 @@ get '/calendar/change_issue', :to => 'calendar#change_issue'
 get '/calendar/export', :to => 'calendar#export'
 
 # CalDAV routes
-match '/caldav/:user_id/calendar', :to => 'caldav#propfind', :via => :propfind
-match '/caldav/:user_id/calendar', :to => 'caldav#report', :via => :report
+post '/caldav/:user_id/calendar', :to => 'caldav#propfind'
+post '/caldav/:user_id/calendar', :to => 'caldav#report'
 match '/caldav/:user_id/calendar/:event_id.ics', :to => 'caldav#put', :via => :put
 
 get '/holidays/new', :to => 'holidays#new'

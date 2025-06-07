@@ -125,3 +125,8 @@ end
 
 UsersController.prepend(MegaCalendar::UsersControllerPatch)
 IssuesController.prepend(MegaCalendar::IssuesControllerPatch)
+
+Rails.application.config.to_prepare do
+  # CalDAVメソッドをRailsの設定に追加
+  Rails.application.config.action_dispatch.http_methods = Rails::Http::METHODS + %w(PROPFIND REPORT)
+end
