@@ -93,7 +93,8 @@ class CaldavController < ApplicationController
         title: event.is_a?(Issue) ? "#{event.id} - #{event.subject}" : "休暇",
         start: event.is_a?(Issue) ? event.start_date.to_s : event.start.to_s,
         end: event.is_a?(Issue) ? event.due_date.to_s : (event.end + 1.day).to_s,
-        etag: event.updated_on.to_i.to_s
+        etag: event.updated_on.to_i.to_s,
+        allDay: true
       })
     else
       render plain: 'Not Found', status: :not_found
@@ -150,38 +151,32 @@ class CaldavController < ApplicationController
   end
 
   def build_calendar_query_response(start_date = nil, end_date = nil)
-    Rails.logger.info "=== build_calendar_query_response ==="
-    Rails.logger.info "start_date: #{start_date}"
-    Rails.logger.info "end_date: #{end_date}"
-    
     events = get_events(start_date, end_date)
-    Rails.logger.info "events count: #{events.size}"
-    Rails.logger.info "events: #{events.inspect}"
-    
+  
     builder = Nokogiri::XML::Builder.new do |xml|
-      xml.multistatus('xmlns:D' => 'DAV:', 'xmlns:C' => 'urn:ietf:params:xml:ns:caldav') do
+      xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
         events.each do |event_data|
-          Rails.logger.info "Processing event: #{event_data.inspect}"
-          Rails.logger.info "event_data class: #{event_data.class}"
-          Rails.logger.info "event_data keys: #{event_data.keys}" if event_data.respond_to?(:keys)
-          
           calendar_data = build_icalendar(event_data)
-          xml.response do
-            xml.href("/caldav/#{@user.id}/calendar/#{event_data[:id]}.ics")
-            xml.propstat do
-              xml.prop do
-                xml['D'].getetag "\"#{event_data[:etag]}\""
-                xml['C'].calendar_data calendar_data
+          xml['d'].response do
+            xml['d'].href "/caldav/#{@user.id}/calendar/#{event_data[:id]}.ics"
+            xml['d'].propstat do
+              xml['d'].prop do
+                xml['d'].getetag "\"#{event_data[:etag]}\""
+                xml['d'].displayname event_data[:title]
+                xml['c'].calendar_data do
+                  xml << "<![CDATA[#{calendar_data}]]>"
+                end
               end
-              xml.status 'HTTP/1.1 200 OK'
+              xml['d'].status 'HTTP/1.1 200 OK'
             end
           end
         end
       end
     end
+  
     builder.to_xml
   end
-
+    
   def build_icalendar(event)
     Rails.logger.info "=== build_icalendar ==="
     Rails.logger.info "event: #{event.inspect}"
@@ -189,23 +184,56 @@ class CaldavController < ApplicationController
     return '' unless event.is_a?(Hash)
   
     calendar = Icalendar::Calendar.new
+    
+    # タイムゾーンの設定を追加
+    calendar.timezone do |tz|
+      tz.tzid = 'Asia/Tokyo'
+      
+      # 標準時間の設定
+      tz.standard do |s|
+        s.tzoffsetfrom = '+0900'
+        s.tzoffsetto   = '+0900'
+        s.tzname       = 'JST'
+        s.dtstart      = '19700101T090000'  # 明示的に09:00を指定
+      end
+    end
+    
     ical_event = Icalendar::Event.new
   
-    #start_time = event[:start].include?(' ') ? Time.parse(event[:start]) : Date.parse(event[:start]).to_time
-    #end_time   = event[:end].include?(' ') ? Time.parse(event[:end])   : Date.parse(event[:end]).to_time
-    start_time = Date.parse(event[:start])
-    end_time = Date.parse(event[:end])
-
-    ical_event.dtstart = Icalendar::Values::Date.new(start_time)
-    ical_event.dtend   = Icalendar::Values::Date.new(end_time)
-    ical_event.summary = event[:title]
-    ical_event.uid     = event[:id]
-    ical_event.dtstamp = Time.now
+    # 判定：時間が含まれるかで日付型を変える
+    is_all_day = event[:allDay] || (!event[:start].include?(' ') && !event[:end].to_s.include?(' '))
   
+    if is_all_day
+      start_date = Date.parse(event[:start])
+      end_date =
+        if event[:end].present?
+          Date.parse(event[:end])
+        else
+          start_date + 1
+        end
+      ical_event.dtstart = Icalendar::Values::Date.new(start_date)
+      ical_event.dtend   = Icalendar::Values::Date.new(end_date)
+    else
+      start_time = Time.parse(event[:start])
+      end_time =
+        if event[:end].present?
+          Time.parse(event[:end])
+        else
+          start_time + 1.day
+        end
+      # タイムゾーンIDを明示的に指定
+      ical_event.dtstart = Icalendar::Values::DateTime.new(start_time, 'tzid' => 'Asia/Tokyo')
+      ical_event.dtend   = Icalendar::Values::DateTime.new(end_time, 'tzid' => 'Asia/Tokyo')
+    end
+  
+    ical_event.summary = event[:title]
+    ical_event.uid     = "#{event[:id]}@yourdomain.com"
+    ical_event.dtstamp = Time.now.utc
     calendar.add_event(ical_event)
+  
     calendar.to_ical
   end
-  
+      
   def build_calendar_multiget_response(event_ids)
     events = get_events_by_ids(event_ids)
     
@@ -218,7 +246,7 @@ class CaldavController < ApplicationController
               xml.prop do
                 xml['D'].getetag "\"#{event.updated_on.to_i}\""
                 xml['C'].calendar_data do
-                  xml.text build_icalendar({
+                  xml.cdata build_icalendar({
                     id: event.id,
                     title: event.is_a?(Issue) ? "#{event.id} - #{event.subject}" : "休暇",
                     start: event.is_a?(Issue) ? event.start_date.to_s : event.start.to_s,
