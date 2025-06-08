@@ -161,14 +161,14 @@ class CaldavController < ApplicationController
         Rails.logger.info "start_date: #{start_date}"
         Rails.logger.info "end_date: #{end_date}"
         
-        render xml: build_calendar_query_response(start_date, end_date, filter_id)
+        render xml: build_calendar_query_response(start_date, end_date, filter_id), status: :multi_status
       # calendar-multigetリクエストの場合
       elsif doc.at_xpath('//C:calendar-multiget', 'C' => 'urn:ietf:params:xml:ns:caldav')
         # イベントIDを取得
         hrefs = doc.xpath('//D:href', 'D' => 'DAV:').map { |href| href.text }
         event_ids = hrefs.map { |href| href.split('/').last.gsub('.ics', '') }
         
-        render xml: build_calendar_multiget_response(event_ids)
+        render xml: build_calendar_multiget_response(event_ids), status: :multi_status
       else
         render plain: 'Not Implemented', status: :not_implemented
       end
@@ -240,7 +240,7 @@ class CaldavController < ApplicationController
                     xml['C'].calendar
                   end
                   xml['D'].displayname @user.name
-                  xml['D'].owner { xml['D'].href("/caldav/#{user.id}/principals/") }
+                  xml['D'].owner { xml['D'].href("/caldav/#{@user.id}/principals/") }
                   xml['C'].calendar_description 'Mega Calendar'
                   xml['C'].supported_calendar_component_set do
                     xml['C'].comp name: 'VEVENT'
@@ -266,32 +266,28 @@ class CaldavController < ApplicationController
     end
         
     def build_calendar_query_response(start_date = nil, end_date = nil, filter_id = nil)
-      events = get_events(start_date, end_date, filter_id)
-    
-      builder = Nokogiri::XML::Builder.new do |xml|
-        xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
-          events.each do |event_data|
-            calendar_data = build_icalendar(event_data)
-            xml['d'].response do
-              xml['d'].href "/caldav/#{@user.id}/calendar/#{event_data[:id]}.ics"
-              xml['d'].propstat do
-                xml['d'].prop do
-                  xml['d'].getetag "\"#{event_data[:etag]}\""
-                  xml['d'].displayname event_data[:title]
-                  xml['c'].calendar_data do
-                    xml << "<![CDATA[#{calendar_data}]]>"
+        events = get_events(start_date, end_date, filter_id)
+      
+        builder = Nokogiri::XML::Builder.new do |xml|
+          xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
+            events.each do |event_data|
+              xml['d'].response do
+                xml['d'].href "/caldav/#{@user.id}/calendar/#{event_data[:id]}.ics"
+                xml['d'].propstat do
+                  xml['d'].prop do
+                    xml['d'].getetag "\"#{event_data[:etag]}\""
                   end
+                  xml['d'].status 'HTTP/1.1 200 OK'
                 end
-                xml['d'].status 'HTTP/1.1 200 OK'
               end
             end
           end
         end
-      end
-    
-      builder.to_xml
+      
+        builder.to_xml
     end
 
+      
     def build_resourcetype_response(href)
         Nokogiri::XML::Builder.new do |xml|
           xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:cal' => 'urn:ietf:params:xml:ns:caldav') do
@@ -538,35 +534,58 @@ class CaldavController < ApplicationController
     end
         
     def build_calendar_multiget_response(event_ids)
-      events = get_events_by_ids(event_ids)
-      
-      builder = Nokogiri::XML::Builder.new do |xml|
-        xml.multistatus('xmlns:D' => 'DAV:', 'xmlns:C' => 'urn:ietf:params:xml:ns:caldav') do
-          events.each do |event|
-            xml.response do
-              xml.href("/caldav/#{@user.id}/calendar/#{event.id}.ics")
-              xml.propstat do
-                xml.prop do
-                  xml['D'].getetag "\"#{event.updated_on.to_i}\""
-                  xml['C'].calendar_data do
-                    xml.cdata build_icalendar({
-                      id: event.id,
-                      title: event.is_a?(Issue) ? "#{event.id} - #{event.subject}" : "休暇",
-                      start: event.is_a?(Issue) ? event.start_date.to_s : event.start.to_s,
-                      end: event.is_a?(Issue) ? event.due_date.to_s : (event.end + 1.day).to_s,
-                      etag: event.updated_on.to_i.to_s
-                    })
-                  end
+    events = get_events_by_ids(event_ids)
+
+    builder = Nokogiri::XML::Builder.new(encoding: 'UTF-8') do |xml|
+        xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
+        events.each do |event|
+            start_date = event.start_date || Date.today
+            end_date = event.due_date || start_date
+
+            calendar_data = <<~ICAL
+            BEGIN:VCALENDAR
+            PRODID:icalendar-ruby
+            CALSCALE:GREGORIAN
+            VERSION:2.0
+            BEGIN:VEVENT
+            CREATED:#{event.created_on.utc.strftime('%Y%m%dT%H%M%SZ')}
+            DTSTAMP:#{event.updated_on.utc.strftime('%Y%m%dT%H%M%SZ')}
+            LAST-MODIFIED:#{event.updated_on.utc.strftime('%Y%m%dT%H%M%SZ')}
+            SEQUENCE:#{event.updated_on.to_i}
+            UID:issue_#{event.id}
+            DTSTART;VALUE=DATE:#{start_date.strftime('%Y%m%d')}
+            DTEND;VALUE=DATE:#{(end_date + 1).strftime('%Y%m%d')}
+            STATUS:CONFIRMED
+            SUMMARY:#{event.subject}
+            END:VEVENT
+            END:VCALENDAR
+            ICAL
+
+            xml['d'].response do
+            xml['d'].href "/caldav/#{@user.id}/calendar/issue_#{event.id}.ics"
+
+            xml['d'].propstat do
+                xml['d'].prop do
+                xml['d'].getetag "\"#{event.updated_on.to_i}\""
+                xml['c'].send('calendar-data') do
+                    xml.cdata calendar_data.strip
                 end
-                xml.status 'HTTP/1.1 200 OK'
-              end
+                end
+                xml['d'].status 'HTTP/1.1 200 OK'
             end
-          end
+
+            xml['d'].propstat do
+                xml['d'].prop { xml['d'].displayname }
+                xml['d'].status 'HTTP/1.1 404 Not Found'
+            end
+            end
         end
-      end
-      builder.to_xml
+        end
     end
-    
+
+    builder.to_xml
+    end
+          
     def get_events(start_date = nil, end_date = nil, filter_id = nil)
       Rails.logger.info "=== get_events ==="
       Rails.logger.info "start_date: #{start_date}"
