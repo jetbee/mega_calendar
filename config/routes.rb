@@ -11,12 +11,16 @@ get '/calendar/change_issue', :to => 'calendar#change_issue'
 get '/calendar/export', :to => 'calendar#export'
 
 # CalDAV routes
-match '/caldav/:user_id/calendar(/:filter_id)/', :to => 'caldav#options', :via => :options
-match '/caldav/:user_id/calendar(/:filter_id)/', :to => 'caldav#propfind', :via => :propfind
-match '/caldav/:user_id/calendar(/:filter_id)/', :to => 'caldav#report', :via => :report
+match '/caldav/:user_id/', :to => 'caldav#options', :via => [:head, :options]
+match '/caldav/:user_id/calendar/', :to => 'caldav#calendar_propfind', :via => :propfind
+match '/caldav/:user_id/calendar/:filter_id/', :to => 'caldav#options', :via => [:head, :options]
+match '/caldav/:user_id/calendar/:filter_id/', :to => 'caldav#filter_propfind', :via => :propfind
+match '/caldav/:user_id/calendar/:filter_id/', :to => 'caldav#report', :via => :report
 match '/caldav/:user_id/calendar/:event_id.ics', :to => 'caldav#get', :via => :get
 match '/caldav/:user_id/calendar/:event_id.ics', :to => 'caldav#put', :via => :put
 match '/caldav/:user_id/calendar/:event_id.ics', :to => 'caldav#delete', :via => :delete
+match '/caldav/:user_id/principals', :to => 'caldav#principal_propfind', :via => :propfind
+
 
 get '/holidays/new', :to => 'holidays#new'
 get '/holidays/create', :to => 'holidays#create'
