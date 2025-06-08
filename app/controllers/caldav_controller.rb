@@ -55,12 +55,15 @@ class CaldavController < ApplicationController
       if end_date
         end_date = Time.strptime(end_date, '%Y%m%dT%H%M%SZ').strftime('%Y-%m-%d')
       end
-      
+
+      # ここで filter_id を取得
+      filter_id = params[:filter_id].presence
+
       Rails.logger.info "=== Converted Dates ==="
       Rails.logger.info "start_date: #{start_date}"
       Rails.logger.info "end_date: #{end_date}"
       
-      render xml: build_calendar_query_response(start_date, end_date)
+      render xml: build_calendar_query_response(start_date, end_date, filter_id)
     # calendar-multigetリクエストの場合
     elsif doc.at_xpath('//C:calendar-multiget', 'C' => 'urn:ietf:params:xml:ns:caldav')
       # イベントIDを取得
@@ -150,8 +153,8 @@ class CaldavController < ApplicationController
     builder.to_xml
   end
 
-  def build_calendar_query_response(start_date = nil, end_date = nil)
-    events = get_events(start_date, end_date)
+  def build_calendar_query_response(start_date = nil, end_date = nil, filter_id = nil)
+    events = get_events(start_date, end_date, filter_id)
   
     builder = Nokogiri::XML::Builder.new do |xml|
       xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
@@ -264,69 +267,81 @@ class CaldavController < ApplicationController
     builder.to_xml
   end
 
-  def get_events(start_date = nil, end_date = nil)
+  def get_events(start_date = nil, end_date = nil, filter_id = nil)
     Rails.logger.info "=== get_events ==="
     Rails.logger.info "start_date: #{start_date}"
     Rails.logger.info "end_date: #{end_date}"
+    Rails.logger.info "filter_id: #{filter_id}"
     
     # デフォルトの日付範囲を設定
     start_date ||= Date.today.to_s
     end_date ||= (Date.today + 1.year).to_s
-
+  
     # 日付をDateオブジェクトに変換
     start_date = Date.parse(start_date)
     end_date = Date.parse(end_date)
-
+  
     Rails.logger.info "Parsed dates - start_date: #{start_date}, end_date: #{end_date}"
-
+  
     # イベントを取得
-    issues_condition = "1=1"  # デフォルトの条件
-    holidays_condition = "1=1"  # デフォルトの条件
+    issues = []
 
+    if filter_id.present?
+        
+        uf = UserFilter.where(id: filter_id, user_id: @user.id).first
+        if uf.present?
+          Rails.logger.info "Loaded filter_code for user_filter_id=#{filter_id}"
+          begin
+            filter_code = JSON.parse(uf.filter_code)
+          rescue => e
+            Rails.logger.warn "Failed to parse filter_code: #{e.message}"
+            filter_code = nil
+          end
+        else
+          Rails.logger.warn "UserFilter not found or not owned by user: #{filter_id}"
+          filter_code = nil
+        end
+    end
+      
+    if filter_id.present?
+      assignee_ids = Array(filter_code.dig('assignee', 'value')).map(&:to_i)
+      issues = Issue.where(assigned_to_id: assignee_ids)
+                      .where('start_date <= ? AND (due_date IS NULL OR due_date >= ?)', end_date, start_date)
+      Rails.logger.info "Loaded #{issues.size} issues by assignee filter"
+      
+    else
+      issues += Issue.where([
+        '((issues.start_date <= ? AND issues.due_date >= ?) OR (issues.start_date BETWEEN ? AND ?) OR (issues.due_date BETWEEN ? AND ?))',
+        start_date, end_date, start_date, end_date, start_date, end_date
+      ])
+      issues += Issue.where([
+        'issues.start_date >= ? AND issues.start_date <= ? AND issues.due_date IS NULL',
+        start_date, end_date
+      ])
+      issues += Issue.where([
+        'issues.start_date IS NULL AND issues.due_date <= ? AND issues.due_date >= ?',
+        end_date, start_date
+      ])
+      if Setting.plugin_mega_calendar['display_empty_dates'].to_i == 1
+        issues += Issue.where([
+          'issues.start_date IS NULL AND issues.due_date IS NULL AND (issues.created_on BETWEEN ? AND ?)',
+          start_date, end_date
+        ])
+      end
+      issues = issues.compact.uniq
+    end
+  
     # 休暇を取得
     holidays = Holiday.where([
       '((holidays.start <= ? AND holidays.end >= ?) OR (holidays.start BETWEEN ? AND ?) OR (holidays.end BETWEEN ? AND ?))',
       start_date, end_date, start_date, end_date, start_date, end_date
-    ]).where(holidays_condition)
-
+    ])
+  
     Rails.logger.info "Found holidays: #{holidays.size}"
-
-    # 課題を取得
-    issues = Issue.where([
-      '((issues.start_date <= ? AND issues.due_date >= ?) OR (issues.start_date BETWEEN ? AND ?) OR (issues.due_date BETWEEN ? AND ?))',
-      start_date, end_date, start_date, end_date, start_date, end_date
-    ]).where(issues_condition)
-
-    Rails.logger.info "Found issues: #{issues.size}"
-
-    # 開始日のみの課題
-    issues2 = Issue.where([
-      'issues.start_date >= ? AND issues.start_date <= ? AND issues.due_date IS NULL',
-      start_date, end_date
-    ]).where(issues_condition)
-
-    # 終了日のみの課題
-    issues3 = Issue.where([
-      'issues.start_date IS NULL AND issues.due_date <= ? AND issues.due_date >= ?',
-      end_date, start_date
-    ]).where(issues_condition)
-
-    # 日付なしの課題
-    issues4 = []
-    if Setting.plugin_mega_calendar['display_empty_dates'].to_i == 1
-      issues4 = Issue.where([
-        'issues.start_date IS NULL AND issues.due_date IS NULL AND (issues.created_on BETWEEN ? AND ?)',
-        start_date, end_date
-      ]).where(issues_condition)
-    end
-
-    # イベントを結合
-    all_issues = (issues + issues2 + issues3 + issues4).compact.uniq
-
+  
     # イベントを整形
     events = []
-    
-    # 休暇を追加
+  
     holidays.each do |h|
       events << {
         id: "holiday_#{h.id}",
@@ -337,21 +352,20 @@ class CaldavController < ApplicationController
         etag: h.updated_on.to_i.to_s
       }
     end
-
-    # 課題を追加
-    all_issues.each do |i|
+  
+    issues.each do |i|
       ticket_time = TicketTime.where(issue_id: i.id).first rescue nil
       tbegin = ticket_time&.time_begin&.strftime(" %H:%M") || ''
       tend = ticket_time&.time_end&.strftime(" %H:%M") || ''
-
+  
       issue_start_date = i.start_date || i.due_date
       issue_end_date = i.due_date || i.start_date
-
+  
       if issue_start_date.blank? && issue_end_date.blank? && Setting.plugin_mega_calendar['display_empty_dates'].to_i == 1
         issue_start_date = i.created_on
         issue_end_date = i.created_on
       end
-
+  
       event = {
         id: "issue_#{i.id}",
         title: "#{i.id} - #{i.subject}",
@@ -359,20 +373,20 @@ class CaldavController < ApplicationController
         end: issue_end_date.to_date.to_s + tend,
         etag: i.updated_on.to_i.to_s
       }
-
+  
       if tbegin.blank? || tend.blank?
         event[:allDay] = true
         if !issue_end_date.blank? && tend.blank?
           event[:end] = (issue_end_date + 1.day).to_date.to_s
         end
       end
-
+  
       events << event
     end
-
+  
     events
   end
-
+  
   def get_event_by_id(event_id)
     if event_id.start_with?('issue_')
       issue_id = event_id.sub('issue_', '')
