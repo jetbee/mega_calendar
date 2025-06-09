@@ -485,7 +485,7 @@ class CaldavController < ApplicationController
       calendar = Icalendar::Calendar.new
       
       # 設定されたタイムゾーンを取得
-      timezone = MegaCalendar::Configuration.settings[:timezone]
+      timezone = Setting.plugin_mega_calendar['timezone']
       tz = ActiveSupport::TimeZone[timezone]
       
       # タイムゾーンの設定を追加
@@ -546,7 +546,7 @@ class CaldavController < ApplicationController
     def build_calendar_multiget_response(event_ids)
         events = get_events_by_ids(event_ids)
         # 設定ファイルからタイムゾーンを取得
-        timezone = MegaCalendar::Configuration.settings[:timezone]
+        timezone = Setting.plugin_mega_calendar['timezone']
         tz = ActiveSupport::TimeZone[timezone]
     
         builder = Nokogiri::XML::Builder.new(encoding: 'UTF-8') do |xml|
@@ -606,7 +606,9 @@ class CaldavController < ApplicationController
                         #{dtstart_line}
                         #{dtend_line}
                         STATUS:CONFIRMED
-                        SUMMARY:#{event.subject}
+                        SUMMARY:##{event.id} #{event.subject}#{event.estimated_hours ? " [#{event.estimated_hours}h]" : ""}
+                        DESCRIPTION:#{Setting.protocol}://#{Setting.host_name}/issues/#{event.id}
+                        ATTACH;VALUE=URI:#{Setting.protocol}://#{Setting.host_name}/issues/#{event.id}
                         END:VEVENT
                         END:VCALENDAR
                     ICAL
@@ -737,7 +739,7 @@ class CaldavController < ApplicationController
     
         event = {
           id: "issue_#{i.id}",
-          title: "#{i.id} - #{i.subject}",
+          title: "##{i.id} #{i.subject}",
           start: issue_start_date.to_date.to_s + tbegin,
           end: issue_end_date.to_date.to_s + tend,
           etag: i.updated_on.to_i.to_s
