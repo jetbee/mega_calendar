@@ -1,3 +1,24 @@
+# frozen_string_literal: true
+
+module MegaCalendar
+  class Configuration
+    # default settings for mega calendar
+    DEFAULT_SETTINGS = {
+      timezone: 'Asia/Tokyo'  # デフォルトのタイムゾーン
+    }.freeze
+
+    class << self
+      def settings
+        @settings ||= DEFAULT_SETTINGS.dup
+      end
+
+      def configure
+        yield settings if block_given?
+      end
+    end
+  end
+end
+
 ## SNIP - Filters
 $mc_filters = {}
 $mc_filters['assignee'] = {
@@ -119,8 +140,17 @@ Redmine::Plugin.register :mega_calendar do
     'default_event_text_color' => '000000',
     'sub_path' => '/',
     'week_start' => '1',
-    'allowed_users' => User.where(["users.login IS NOT NULL AND users.login <> ''"]).collect {|x| x.id.to_s}
+    'allowed_users' => User.where(["users.login IS NOT NULL AND users.login <> ''"]).collect {|x| x.id.to_s},
+    'timezone' => 'Asia/Tokyo'
   }, :partial => 'settings/mega_calendar_settings'
+end
+
+# 初期設定を読み込む
+Rails.configuration.to_prepare do
+  MegaCalendar::Configuration.configure do |config|
+    # 必要に応じて設定を上書き
+    config[:timezone] = Setting.plugin_mega_calendar['timezone'] if Setting.plugin_mega_calendar['timezone'].present?
+  end
 end
 
 UsersController.prepend(MegaCalendar::UsersControllerPatch)
