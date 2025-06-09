@@ -559,6 +559,30 @@ class CaldavController < ApplicationController
       calendar.to_ical
     end
         
+    def get_events_by_ids(event_ids)
+      events = []
+    
+      event_ids.each do |id|
+        if id.start_with?('issue_')
+          issue_id = id.sub('issue_', '')
+          begin
+            events << Issue.find(issue_id)
+          rescue ActiveRecord::RecordNotFound
+            Rails.logger.warn "Issue not found: #{issue_id}"
+          end
+        elsif id.start_with?('holiday_')
+          holiday_id = id.sub('holiday_', '')
+          begin
+            events << Holiday.find(holiday_id)
+          rescue ActiveRecord::RecordNotFound
+            Rails.logger.warn "Holiday not found: #{holiday_id}"
+          end
+        end
+      end
+    
+      events
+    end
+
     def build_calendar_multiget_response(event_ids)
         events = get_events_by_ids(event_ids)
         # 設定ファイルからタイムゾーンを取得
@@ -654,48 +678,79 @@ class CaldavController < ApplicationController
         builder.to_xml
     end
               
+    def query_filter(model, filters)
+      condition = [""]
+  
+      condition[0] << "(" + (model == 'Holiday' ? 'holidays.user_id' : 'issues.assigned_to_id')+' IN (?) OR ' + (model == 'Holiday' ? 'holidays.user_id' : 'issues.assigned_to_id') + ' IN (SELECT user_id FROM groups_users WHERE group_id IN (?)) OR ' + (model == 'Holiday' ? 'holidays.user_id' : 'issues.assigned_to_id') + " IS NULL)"
+      condition << Setting.plugin_mega_calendar['displayed_users']
+      condition << Setting.plugin_mega_calendar['displayed_users']
+        
+      filters.keys.each do |x|
+        filter_param = filters[x]
+        filter = $mc_filters[x]
+        if((filter_param[:enabled].to_s != 'true') || (filter_param['enabled'].to_s != 'true') || ((model == 'Holiday' && filter[:db_field_holiday].blank?) || (model == 'Issue' && filter[:db_field].blank?)))
+          next
+        end
+        condition[0] << ' AND '
+        if (filter[:condition].blank? && model == 'Issue') || (filter[:condition_holiday].blank? && model == 'Holiday')
+          condition[0] << (model == 'Issue' ? filter[:db_field] : filter[:db_field_holiday]) + ' '
+          if filter_param[:operator] == 'contains'
+            condition[0] << 'IN '
+          elsif filter_param[:operator] == 'not_contains'
+            condition[0] << 'NOT IN '
+          end
+          condition[0] << '(?)'
+          condition << filter_param[:value]
+        else
+          tmpcondition = (model == 'Issue' ? filter[:condition].gsub('##FIELD_ID##',filter[:db_field]) : filter[:condition_holiday].gsub('##FIELD_ID##',filter[:db_field_holiday])) + ' '
+          count_values = tmpcondition.scan(/(?=\?)/).count
+          if filter_param[:operator] == 'contains'
+            tmpcondition = tmpcondition.gsub('##OPERATOR##','IN')
+          elsif filter_param[:operator] == 'not_contains'
+            tmpcondition = tmpcondition.gsub('##OPERATOR##','NOT IN')
+          end
+          condition[0] << tmpcondition
+          count_values.times.each do
+            condition << filter_param[:value]
+          end
+        end
+      end
+      sql = ActiveRecord::Base.send(:sanitize_sql_array, condition)
+      Rails.logger.info "Final SQL condition: #{sql}"
+      Rails.logger.info "Raw condition array: #{condition.inspect}"
+      return condition
+    end
+  
     def get_events(start_date = nil, end_date = nil, filter_id = nil)
       Rails.logger.info "=== get_events ==="
       Rails.logger.info "start_date: #{start_date}"
       Rails.logger.info "end_date: #{end_date}"
       Rails.logger.info "filter_id: #{filter_id}"
-      
-      # デフォルトの日付範囲を設定
+    
       start_date ||= Date.today.to_s
       end_date ||= (Date.today + 1.year).to_s
-    
-      # 日付をDateオブジェクトに変換
       start_date = Date.parse(start_date)
       end_date = Date.parse(end_date)
     
       Rails.logger.info "Parsed dates - start_date: #{start_date}, end_date: #{end_date}"
     
-      # イベントを取得
       issues = []
-  
+    
       if filter_id.present?
-          
-          uf = UserFilter.where(id: filter_id, user_id: @user.id).first
-          if uf.present?
-            Rails.logger.info "Loaded filter_code for user_filter_id=#{filter_id}"
-            begin
-              filter_code = JSON.parse(uf.filter_code)
-            rescue => e
-              Rails.logger.warn "Failed to parse filter_code: #{e.message}"
-              filter_code = nil
-            end
-          else
-            Rails.logger.warn "UserFilter not found or not owned by user: #{filter_id}"
-            filter_code = nil
+        uf = UserFilter.where(id: filter_id, user_id: @user.id).first
+        if uf.present?
+          begin
+            filter_code = JSON.parse(uf.filter_code).with_indifferent_access
+            conditions = query_filter('Issue', filter_code)
+            issues = Issue.where(conditions).where(
+              '(start_date <= ? AND (due_date IS NULL OR due_date >= ?))', end_date, start_date
+            )
+          rescue => e
+            Rails.logger.warn "Error processing filter: #{e.message}"
           end
-      end
-        
-      if filter_id.present?
-        assignee_ids = Array(filter_code.dig('assignee', 'value')).map(&:to_i)
-        issues = Issue.where(assigned_to_id: assignee_ids)
-                        .where('start_date <= ? AND (due_date IS NULL OR due_date >= ?)', end_date, start_date)
-        Rails.logger.info "Loaded #{issues.size} issues by assignee filter"
-        
+        else
+          Rails.logger.warn "UserFilter not found or not owned by user: #{filter_id}"
+        end
       else
         issues += Issue.where([
           '((issues.start_date <= ? AND issues.due_date >= ?) OR (issues.start_date BETWEEN ? AND ?) OR (issues.due_date BETWEEN ? AND ?))',
@@ -718,7 +773,6 @@ class CaldavController < ApplicationController
         issues = issues.compact.uniq
       end
     
-      # 休暇を取得
       holidays = Holiday.where([
         '((holidays.start <= ? AND holidays.end >= ?) OR (holidays.start BETWEEN ? AND ?) OR (holidays.end BETWEEN ? AND ?))',
         start_date, end_date, start_date, end_date, start_date, end_date
@@ -726,7 +780,6 @@ class CaldavController < ApplicationController
     
       Rails.logger.info "Found holidays: #{holidays.size}"
     
-      # イベントを整形
       events = []
     
       holidays.each do |h|
@@ -763,67 +816,12 @@ class CaldavController < ApplicationController
     
         if tbegin.blank? || tend.blank?
           event[:allDay] = true
-          if !issue_end_date.blank? && tend.blank?
-            event[:end] = (issue_end_date + 1.day).to_date.to_s
-          end
+          event[:end] = (issue_end_date + 1.day).to_date.to_s if !issue_end_date.blank? && tend.blank?
         end
     
         events << event
       end
-    
       events
-    end
-    
-    def get_event_by_id(event_id)
-      if event_id.start_with?('issue_')
-        issue_id = event_id.sub('issue_', '')
-        Issue.find(issue_id)
-      elsif event_id.start_with?('holiday_')
-        holiday_id = event_id.sub('holiday_', '')
-        Holiday.find(holiday_id)
-      end
-    end
-  
-    def get_events_by_ids(event_ids)
-      # 指定されたIDのイベントを取得
-      events = []
-      event_ids.each do |id|
-        if id.start_with?('issue_')
-          issue_id = id.sub('issue_', '')
-          events << Issue.find(issue_id)
-        elsif id.start_with?('holiday_')
-          holiday_id = id.sub('holiday_', '')
-          events << Holiday.find(holiday_id)
-        end
-      end
-      events
-    end
-  
-    def save_calendar_event(calendar_data)
-      # iCalendarデータをパースして保存
-      calendar = Icalendar::Calendar.parse(calendar_data).first
-      event = calendar.events.first
-      
-      if event
-        if event.uid.start_with?('issue_')
-          issue_id = event.uid.sub('issue_', '')
-          issue = Issue.find(issue_id)
-          issue.update(
-            start_date: event.dtstart.to_date,
-            due_date: event.dtend.to_date
-          )
-        elsif event.uid.start_with?('holiday_')
-          holiday_id = event.uid.sub('holiday_', '')
-          holiday = Holiday.find(holiday_id)
-          holiday.update(
-            start: event.dtstart.to_date,
-            end: event.dtend.to_date
-          )
-        end
-        true
-      else
-        false
-      end
     end
   
     def delete_event(event_id)
