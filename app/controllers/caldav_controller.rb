@@ -1,17 +1,33 @@
 class CaldavController < ApplicationController
-    skip_before_action :verify_authenticity_token
-    before_action :authenticate_user
-    before_action :check_plugin_right
-    before_action :set_user
+  skip_before_action :verify_authenticity_token
+  skip_before_action :check_if_login_required
+  skip_before_action :require_login if defined?(require_login)
+  skip_before_action :find_current_user if defined?(find_current_user)
+
+  prepend_before_action :authenticate_user
+  before_action :set_user
+  before_action :check_plugin_right
   
-    def authenticate_user
-      authenticate_or_request_with_http_basic do |username, password|
-        @current_user = User.try_to_login(username, password)
-        @current_user.present?
+  def authenticate_user
+    authenticate_with_http_basic do |username, password|
+      user = User.try_to_login(username, password)
+      if user
+        User.current = user
+        Thread.current[:user] = user
+        @current_user = User.current # ← ここで確実にセット
+        Rails.logger.info "CalDAV login success: #{user.login}"
+      else
+        render plain: 'Access Denied', status: :unauthorized
       end
-    end
-  
+    end || render(plain: 'Authorization required', status: :unauthorized)
+  end
+
+  def set_user
+    @current_user ||= User.current
+  end
+
     def check_plugin_right
+      Rails.logger.info "Check plugin right: User.current=#{User.current.inspect} / @current_user=#{@current_user.inspect}"
       right = (!Setting.plugin_mega_calendar['allowed_users'].blank? && 
                Setting.plugin_mega_calendar['allowed_users'].include?(@current_user.id.to_s))
       unless right
