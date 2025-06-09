@@ -41,6 +41,46 @@ Within a issue you are able to set a time as start and end, to get a better cale
 
 Please make sure that you set your users, that will be allowed to use this plugin and that the sub-path is set to "/" without quotes at the plugin settings.
 
+<h2>CalDav Sync(experimental)</h2>
+
+- Sync mega calendar filterd issues with CalDav protocol.
+- Only one way sync redmine to client(outlook and other).
+- Unnable to edit any properties on client calendar.
+
+<h3>Setup</h3>
+
+- You have to put puma.rb that has a stting line below into `redmine/config` directory. and restart redmine.
+
+```puma.rb
+supported_http_methods :any
+```
+
+- You have to set your timezone of calendar in `mega_calendar/init.rb`.
+
+```init.rb
+  settings :default => {
+    .....
+    'timezone' => 'Asia/Tokyo' // <- here.
+  }, :partial => 'settings/mega_calendar_settings'
+```
+
+<h3>Usage</h3>
+
+- Set these properties in your client.
+    - URL
+        `[yourdomain]/caldav/[user_id]/calendar/[megacalendar filter id]/`
+        eg) https://redmine.example.com/caldav/3/calendar/5/
+    - User:
+        Your redmine username.
+        eg) `admin`
+    - Password:
+        Your redmine password.
+
+<h3>Disclaimer</h3>
+
+- I've tested on Outlook 2019 with `Caldav Syncronizer Add-Ins`. It worked well.
+- Thunderbird cannot work with. I don't know why.
+
 <h2>Screenshots</h2>
 
 A quick overview about this plugin, you'll get on <a href="http://www.devbert.de/index.php/en/project/megacalendar/">http://www.devbert.de/index.php/en/project/megacalendar/</a>
