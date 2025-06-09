@@ -484,16 +484,20 @@ class CaldavController < ApplicationController
     
       calendar = Icalendar::Calendar.new
       
+      # 設定されたタイムゾーンを取得
+      timezone = MegaCalendar::Configuration.settings[:timezone]
+      tz = ActiveSupport::TimeZone[timezone]
+      
       # タイムゾーンの設定を追加
       calendar.timezone do |tz|
-        tz.tzid = 'Asia/Tokyo'
+        tz.tzid = timezone
         
         # 標準時間の設定
         tz.standard do |s|
-          s.tzoffsetfrom = '+0900'
-          s.tzoffsetto   = '+0900'
-          s.tzname       = 'JST'
-          s.dtstart      = '19700101T090000'  # 明示的に09:00を指定
+          s.tzoffsetfrom = tz.formatted_offset
+          s.tzoffsetto   = tz.formatted_offset
+          s.tzname       = tz.name
+          s.dtstart      = '19700101T000000'
         end
       end
       
@@ -513,6 +517,7 @@ class CaldavController < ApplicationController
         ical_event.dtstart = Icalendar::Values::Date.new(start_date)
         ical_event.dtend   = Icalendar::Values::Date.new(end_date)
       else
+        # ローカルタイムゾーンの時間を解析
         start_time = Time.parse(event[:start])
         end_time =
           if event[:end].present?
@@ -520,9 +525,14 @@ class CaldavController < ApplicationController
           else
             start_time + 1.day
           end
-        # タイムゾーンIDを明示的に指定
-        ical_event.dtstart = Icalendar::Values::DateTime.new(start_time, 'tzid' => 'Asia/Tokyo')
-        ical_event.dtend   = Icalendar::Values::DateTime.new(end_time, 'tzid' => 'Asia/Tokyo')
+        
+        # ローカルタイムゾーンの時間をUTCに変換
+        start_time_utc = start_time.in_time_zone(timezone).utc
+        end_time_utc = end_time.in_time_zone(timezone).utc
+        
+        # UTCでiCalendarイベントを作成
+        ical_event.dtstart = Icalendar::Values::DateTime.new(start_time_utc, 'tzid' => 'UTC')
+        ical_event.dtend   = Icalendar::Values::DateTime.new(end_time_utc, 'tzid' => 'UTC')
       end
     
       ical_event.summary = event[:title]
@@ -534,58 +544,98 @@ class CaldavController < ApplicationController
     end
         
     def build_calendar_multiget_response(event_ids)
-    events = get_events_by_ids(event_ids)
-
-    builder = Nokogiri::XML::Builder.new(encoding: 'UTF-8') do |xml|
-        xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
-        events.each do |event|
-            start_date = event.start_date || Date.today
-            end_date = event.due_date || start_date
-
-            calendar_data = <<~ICAL
-            BEGIN:VCALENDAR
-            PRODID:icalendar-ruby
-            CALSCALE:GREGORIAN
-            VERSION:2.0
-            BEGIN:VEVENT
-            CREATED:#{event.created_on.utc.strftime('%Y%m%dT%H%M%SZ')}
-            DTSTAMP:#{event.updated_on.utc.strftime('%Y%m%dT%H%M%SZ')}
-            LAST-MODIFIED:#{event.updated_on.utc.strftime('%Y%m%dT%H%M%SZ')}
-            SEQUENCE:#{event.updated_on.to_i}
-            UID:issue_#{event.id}
-            DTSTART;VALUE=DATE:#{start_date.strftime('%Y%m%d')}
-            DTEND;VALUE=DATE:#{(end_date + 1).strftime('%Y%m%d')}
-            STATUS:CONFIRMED
-            SUMMARY:#{event.subject}
-            END:VEVENT
-            END:VCALENDAR
-            ICAL
-
-            xml['d'].response do
-            xml['d'].href "/caldav/#{@user.id}/calendar/issue_#{event.id}.ics"
-
-            xml['d'].propstat do
-                xml['d'].prop do
-                xml['d'].getetag "\"#{event.updated_on.to_i}\""
-                xml['c'].send('calendar-data') do
-                    xml.cdata calendar_data.strip
+        events = get_events_by_ids(event_ids)
+        # 設定ファイルからタイムゾーンを取得
+        timezone = MegaCalendar::Configuration.settings[:timezone]
+        tz = ActiveSupport::TimeZone[timezone]
+    
+        builder = Nokogiri::XML::Builder.new(encoding: 'UTF-8') do |xml|
+            xml['d'].multistatus('xmlns:d' => 'DAV:', 'xmlns:c' => 'urn:ietf:params:xml:ns:caldav') do
+                events.each do |event|
+                    start_date = event.start_date || Date.today
+                    end_date = event.due_date || start_date
+    
+                    ticket_time = TicketTime.find_by(issue_id: event.id)
+                    time_format = '%Y%m%dT%H%M%SZ'
+    
+                    dtstart_line, dtend_line = if ticket_time&.time_begin && ticket_time&.time_end
+                      # 設定されたタイムゾーンで構築
+                      start_dt_local = Time.new(
+                        start_date.year,
+                        start_date.month,
+                        start_date.day,
+                        ticket_time.time_begin.hour,
+                        ticket_time.time_begin.min,
+                        0,
+                        tz.formatted_offset
+                      )
+                    
+                      end_dt_local = Time.new(
+                        end_date.year,
+                        end_date.month,
+                        end_date.day,
+                        ticket_time.time_end.hour,
+                        ticket_time.time_end.min,
+                        0,
+                        tz.formatted_offset
+                      )
+                    
+                      # ローカルタイム → UTC にしてiCalフォーマットに
+                      [
+                        "DTSTART:#{start_dt_local.utc.strftime(time_format)}",
+                        "DTEND:#{end_dt_local.utc.strftime(time_format)}"
+                      ]
+                    else
+                      [
+                        "DTSTART;VALUE=DATE:#{start_date.strftime('%Y%m%d')}",
+                        "DTEND;VALUE=DATE:#{(end_date + 1).strftime('%Y%m%d')}"
+                      ]
+                    end
+                                              
+                    calendar_data = <<~ICAL
+                        BEGIN:VCALENDAR
+                        PRODID:icalendar-ruby
+                        CALSCALE:GREGORIAN
+                        VERSION:2.0
+                        BEGIN:VEVENT
+                        CREATED:#{event.created_on.utc.strftime(time_format)}
+                        DTSTAMP:#{event.updated_on.utc.strftime(time_format)}
+                        LAST-MODIFIED:#{event.updated_on.utc.strftime(time_format)}
+                        SEQUENCE:#{event.updated_on.to_i}
+                        UID:issue_#{event.id}
+                        #{dtstart_line}
+                        #{dtend_line}
+                        STATUS:CONFIRMED
+                        SUMMARY:#{event.subject}
+                        END:VEVENT
+                        END:VCALENDAR
+                    ICAL
+    
+                    xml['d'].response do
+                        xml['d'].href "/caldav/#{@user.id}/calendar/issue_#{event.id}.ics"
+    
+                        xml['d'].propstat do
+                            xml['d'].prop do
+                                xml['d'].getetag "\"#{event.updated_on.to_i}\""
+                                xml['c'].send('calendar-data') do
+                                    xml.cdata calendar_data.strip
+                                end
+                            end
+                            xml['d'].status 'HTTP/1.1 200 OK'
+                        end
+    
+                        xml['d'].propstat do
+                            xml['d'].prop { xml['d'].displayname }
+                            xml['d'].status 'HTTP/1.1 404 Not Found'
+                        end
+                    end
                 end
-                end
-                xml['d'].status 'HTTP/1.1 200 OK'
-            end
-
-            xml['d'].propstat do
-                xml['d'].prop { xml['d'].displayname }
-                xml['d'].status 'HTTP/1.1 404 Not Found'
-            end
             end
         end
-        end
+    
+        builder.to_xml
     end
-
-    builder.to_xml
-    end
-          
+              
     def get_events(start_date = nil, end_date = nil, filter_id = nil)
       Rails.logger.info "=== get_events ==="
       Rails.logger.info "start_date: #{start_date}"
