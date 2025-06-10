@@ -190,19 +190,49 @@ class CaldavController < ApplicationController
       end
     end
 
+def normalize_line_endings(calendar_data)
+  calendar_data.gsub!("\r\n", "\n")
+  calendar_data
+end
+
+def correct_allday(calendar_data)
+  # 改行コードを正規化
+  calendar_data = normalize_line_endings(calendar_data)
+
+  # TZIDを最初にパースする
+  current_tzid = calendar_data.match(/^TZID:(.+)$/)[1].strip rescue 'UTC'
+  
+  # 終日イベントを日時イベントに変換
+  calendar_data.gsub!(/^DTSTART;VALUE=DATE:(\d{8})$/) do
+    "DTSTART;TZID=#{current_tzid}:#{$1}T000000"
+  end
+  
+  calendar_data.gsub!(/^DTEND;VALUE=DATE:(\d{8})$/) do
+    "DTEND;TZID=#{current_tzid}:#{$1}T000000"
+  end
+
+  calendar_data
+end
+
 def correct_timezone(calendar_data)
   calendar_data.gsub("TZID:Tokyo Standard Time", "TZID:Asia/Tokyo")
 end
   
 def put
   calendar_data = request.body.read
+  Rails.logger.info "calendar_data: #{calendar_data}"
+
+  # All Day の救済
+  corrected_calendar_data = correct_allday(calendar_data)
   # タイムゾーンの修正
-  corrected_calendar_data = correct_timezone(calendar_data)
+  corrected_calendar_data = correct_timezone(corrected_calendar_data)
+  Rails.logger.info "corrected_calendar_data: #{corrected_calendar_data}"
 
   begin
     # iCalendarデータを解析
     cal = Icalendar::Calendar.parse(corrected_calendar_data).first
     ical_event = cal.events.first
+    Rails.logger.info "ical_event: #{ical_event.inspect}"
     
     # イベントの識別子を抽出
     event_id = ical_event.uid.to_s.split('@').first
@@ -226,14 +256,21 @@ def put
       issue = Issue.find(issue_id)
       
       if issue
-        # 日付更新
-        issue.update(start_date: start_time_converted.to_date, due_date: end_time_converted.to_date)
-        
         # 特定の時刻情報がない場合、つまり終日イベントの場合
         if start_time_converted.hour == 0 && start_time_converted.min == 0 && end_time_converted.hour == 0 && end_time_converted.min == 0
+          Rails.logger.info "AllDay!: #{start_time_converted.inspect}/#{end_time_converted.inspect}"
+          # end日付は1日前に。ただし、start より前にはしない
+          if start_time_converted.to_date <= end_time_converted.to_date
+            end_time_converted = start_time_converted - 1.day
+          end
+          # 日付更新
+          issue.update(start_date: start_time_converted.to_date, due_date: end_time_converted.to_date)
           # 時刻情報がない場合、ticket_timeレコードを削除
           TicketTime.where(issue_id: issue_id).destroy_all
         else
+          Rails.logger.info "Not AllDay!: #{start_time_converted.inspect}/#{end_time_converted.inspect}"
+          # 日付更新
+          issue.update(start_date: start_time_converted.to_date, due_date: end_time_converted.to_date)
           # 時刻情報がある場合、ticket_timeレコードを更新または作成
           ticket_time = TicketTime.find_or_initialize_by(issue_id: issue_id)
           ticket_time.update(
