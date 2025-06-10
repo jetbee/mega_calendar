@@ -189,91 +189,93 @@ class CaldavController < ApplicationController
         render plain: 'Not Implemented', status: :not_implemented
       end
     end
+
+def correct_timezone(calendar_data)
+  calendar_data.gsub("TZID:Tokyo Standard Time", "TZID:Asia/Tokyo")
+end
   
-    def put
-      calendar_data = request.body.read
+def put
+  calendar_data = request.body.read
+  # タイムゾーンの修正
+  corrected_calendar_data = correct_timezone(calendar_data)
+
+  begin
+    # iCalendarデータを解析
+    cal = Icalendar::Calendar.parse(corrected_calendar_data).first
+    ical_event = cal.events.first
+    
+    # イベントの識別子を抽出
+    event_id = ical_event.uid.to_s.split('@').first
+    
+    # 開始時刻、終了時刻を取得
+    event_start_time = ical_event.dtstart.to_time
+    event_end_time = ical_event.dtend.to_time
+    sent_tzid = ical_event.dtstart.ical_params['tzid']&.first || 'UTC'
+    
+    # 設定ファイルに基づいたタイムゾーン
+    setting_timezone = Setting.plugin_mega_calendar['timezone']
+    setting_tz = ActiveSupport::TimeZone[setting_timezone]
+    
+    # 時刻を設定されたタイムゾーンへ変換
+    start_time_converted = event_start_time.in_time_zone(sent_tzid).in_time_zone(setting_tz)
+    end_time_converted = event_end_time.in_time_zone(sent_tzid).in_time_zone(setting_tz)
+    
+    # データベースからイベント取得 & 更新
+    if event_id.start_with?('issue_')
+      issue_id = event_id.sub('issue_', '')
+      issue = Issue.find(issue_id)
       
-      begin
-        # iCalendarデータを解析
-        cal = Icalendar::Calendar.parse(calendar_data).first
-        ical_event = cal.events.first
+      if issue
+        # 日付更新
+        issue.update(start_date: start_time_converted.to_date, due_date: end_time_converted.to_date)
         
-        # イベントの識別子を抽出
-        event_id = ical_event.uid.to_s.split('@').first
-        
-        # 開始時刻、終了時刻を取得
-        event_start_time = ical_event.dtstart.to_time
-        event_end_time = ical_event.dtend.to_time
-        sent_tzid = ical_event.dtstart.ical_params['tzid']&.first || 'UTC'
-        
-        # 設定ファイルに基づいたタイムゾーン
-        setting_timezone = Setting.plugin_mega_calendar['timezone']
-        setting_tz = ActiveSupport::TimeZone[setting_timezone]
-        
-        # 時刻を設定されたタイムゾーンへ変換
-        start_time_converted = event_start_time.in_time_zone(sent_tzid).in_time_zone(setting_tz)
-        end_time_converted = event_end_time.in_time_zone(sent_tzid).in_time_zone(setting_tz)
-        
-        # データベースからイベント取得 & 更新
-        if event_id.start_with?('issue_')
-          issue_id = event_id.sub('issue_', '')
-          issue = Issue.find(issue_id)
-          
-          if issue
-            # 日付更新
-            issue.update(start_date: start_time_converted.to_date, due_date: end_time_converted.to_date)
-            
-            if start_time_converted.to_date == start_time_converted &&
-               end_time_converted.to_date == end_time_converted + 1.day
-              # 時刻情報がない場合、ticket_timeレコードを削除
-              TicketTime.where(issue_id: issue_id).destroy_all
-            else
-              # 時刻情報を含む場合、ticket_timeを更新または作成
-              ticket_time = TicketTime.find_or_initialize_by(issue_id: issue_id)
-              ticket_time.update(
-                time_begin: start_time_converted.to_time.strftime("%H:%M"),
-                time_end: end_time_converted.to_time.strftime("%H:%M")
-              )
-            end
-            render plain: 'OK', status: :ok
-          else
-            render plain: 'Not Found', status: :not_found
-          end
-    
-        elsif event_id.start_with?('holiday_')
-          holiday_id = event_id.sub('holiday_', '')
-          holiday = Holiday.find(holiday_id)
-    
-          if holiday
-            # 日付更新
-            holiday.update(start: start_time_converted.to_date, end: end_time_converted.to_date)
-    
-            if start_time_converted.to_date == start_time_converted &&
-               end_time_converted.to_date == end_time_converted + 1.day
-              # 時刻情報がない場合、関連するticket_timeレコードを削除
-              TicketTime.where(issue_id: holiday_id).destroy_all
-            else
-              # 時刻情報を含む場合、ticket_timeを更新または作成
-              ticket_time = TicketTime.find_or_initialize_by(issue_id: holiday_id)
-              ticket_time.update(
-                time_begin: start_time_converted.to_time.strftime("%H:%M"),
-                time_end: end_time_converted.to_time.strftime("%H:%M")
-              )
-            end
-            
-            render plain: 'OK', status: :ok
-          else
-            render plain: 'Not Found', status: :not_found
-          end
-    
+        # 特定の時刻情報がない場合、つまり終日イベントの場合
+        if start_time_converted.hour == 0 && start_time_converted.min == 0 && end_time_converted.hour == 0 && end_time_converted.min == 0
+          # 時刻情報がない場合、ticket_timeレコードを削除
+          TicketTime.where(issue_id: issue_id).destroy_all
         else
-          render plain: 'Invalid Event ID', status: :unprocessable_entity
+          # 時刻情報がある場合、ticket_timeレコードを更新または作成
+          ticket_time = TicketTime.find_or_initialize_by(issue_id: issue_id)
+          ticket_time.update(
+            time_begin: start_time_converted.strftime("%H:%M"),
+            time_end: end_time_converted.strftime("%H:%M")
+          )
         end
-      rescue => e
-        Rails.logger.error "Error updating event: #{e.message}"
-        render plain: 'Error', status: :internal_server_error
+
+        render plain: 'OK', status: :ok
+      else
+        render plain: 'Not Found', status: :not_found
       end
+    elsif event_id.start_with?('holiday_')
+      holiday_id = event_id.sub('holiday_', '')
+      holiday = Holiday.find(holiday_id)
+
+      if holiday
+        # 同様に処理
+        holiday.update(start: start_time_converted.to_date, end: end_time_converted.to_date)
+        
+        if start_time_converted.hour == 0 && start_time_converted.min == 0 && end_time_converted.hour == 0 && end_time_converted.min == 0
+          TicketTime.where(issue_id: holiday_id).destroy_all
+        else
+          ticket_time = TicketTime.find_or_initialize_by(issue_id: holiday_id)
+          ticket_time.update(
+            time_begin: start_time_converted.strftime("%H:%M"),
+            time_end: end_time_converted.strftime("%H:%M")
+          )
+        end
+
+        render plain: 'OK', status: :ok
+      else
+        render plain: 'Not Found', status: :not_found
+      end
+    else
+      render plain: 'Invalid Event ID', status: :unprocessable_entity
     end
+  rescue => e
+    Rails.logger.error "Error updating event: #{e.message}"
+    render plain: 'Error', status: :internal_server_error
+  end
+end
     
     def get
       event_id = params[:event_id]
