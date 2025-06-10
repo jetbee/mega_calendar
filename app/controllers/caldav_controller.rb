@@ -260,8 +260,8 @@ def put
         if start_time_converted.hour == 0 && start_time_converted.min == 0 && end_time_converted.hour == 0 && end_time_converted.min == 0
           Rails.logger.info "AllDay!: #{start_time_converted.inspect}/#{end_time_converted.inspect}"
           # end日付は1日前に。ただし、start より前にはしない
-          if start_time_converted.to_date <= end_time_converted.to_date
-            end_time_converted = start_time_converted - 1.day
+          if start_time_converted.to_date <  end_time_converted.to_date
+            end_time_converted = end_time_converted - 1.day
           end
           # 日付更新
           issue.update(start_date: start_time_converted.to_date, due_date: end_time_converted.to_date)
